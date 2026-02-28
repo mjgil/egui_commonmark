@@ -130,82 +130,6 @@ fn rebuild_candidates(line: &[char], ui: &Ui, font_id: &egui::FontId, available:
     c
 }
 
-fn count_wrapped_lines(
-    chars: &[char],
-    ui: &Ui,
-    font_id: &egui::FontId,
-    first_width: f32,
-    full_width: f32,
-) -> usize {
-    if chars.is_empty() {
-        return 0;
-    }
-
-    let mut lines = 1usize;
-    let mut available = first_width;
-    let mut line: Vec<char> = Vec::new();
-    let mut line_width = 0.0;
-    let mut candidates = RowBreakCandidates::default();
-
-    let mut i = 0usize;
-    while i < chars.len() {
-        let ch = chars[i];
-
-        if ch == '\n' || ch == '\r' {
-            lines += 1;
-            line.clear();
-            line_width = 0.0;
-            candidates = RowBreakCandidates::default();
-            available = full_width;
-            i += 1;
-            continue;
-        }
-
-        line.push(ch);
-        line_width += glyph_width(ui, font_id, ch);
-        let next = chars.get(i + 1).copied();
-        candidates.add(line.len() - 1, ch, next, line_width <= available);
-
-        if line_width > available && !line.is_empty() {
-            let break_at = candidates
-                .get()
-                .unwrap_or(line.len().saturating_sub(1));
-            let split_at = (break_at + 1).min(line.len());
-
-            let mut tail: Vec<char> = line[split_at..].to_vec();
-            while matches!(tail.first(), Some(c) if c.is_whitespace()) {
-                tail.remove(0);
-            }
-
-            lines += 1;
-            line = tail;
-            line_width = measure_line_width(ui, font_id, &line);
-            available = full_width;
-            candidates = rebuild_candidates(&line, ui, font_id, available);
-
-            while line_width > available && !line.is_empty() {
-                let bi = candidates.get();
-                if bi.is_none() || bi == Some(line.len() - 1) {
-                    break;
-                }
-                let split_at = (bi.unwrap() + 1).min(line.len());
-                let mut tail: Vec<char> = line[split_at..].to_vec();
-                while matches!(tail.first(), Some(c) if c.is_whitespace()) {
-                    tail.remove(0);
-                }
-                lines += 1;
-                line = tail;
-                line_width = measure_line_width(ui, font_id, &line);
-                candidates = rebuild_candidates(&line, ui, font_id, available);
-            }
-        }
-
-        i += 1;
-    }
-
-    lines
-}
-
 fn render_inline_code_wrapped(ui: &mut Ui, text: &str, heading_level: Option<u8>) {
     let (font_id, size_opt) = code_font(ui, heading_level);
     let chars: Vec<char> = text.chars().collect();
@@ -218,32 +142,25 @@ fn render_inline_code_wrapped(ui: &mut Ui, text: &str, heading_level: Option<u8>
     let indent = (ui.cursor().min.x - max_rect.left()).max(0.0);
     let mut available = (full_width - indent).max(0.0);
 
-    // If the first line has very little room, prefer moving the entire code span
-    // to the next line to avoid short fragments that waste space.
+    // If the text overflows the remaining space and there are no break
+    // candidates within that space, move the entire span to a new line.
+    // Otherwise let the normal wrapping logic break at word boundaries.
     if available < full_width {
-        let lines_with_indent = count_wrapped_lines(&chars, ui, &font_id, available, full_width);
-        let lines_full = count_wrapped_lines(&chars, ui, &font_id, full_width, full_width);
-
-        if lines_full > 0 && lines_with_indent > lines_full {
+        let mut probe_width = 0.0;
+        let mut candidates = RowBreakCandidates::default();
+        let mut overflowed = false;
+        for (i, ch) in chars.iter().enumerate() {
+            probe_width += glyph_width(ui, &font_id, *ch);
+            let next = chars.get(i + 1).copied();
+            candidates.add(i, *ch, next, probe_width <= available);
+            if probe_width > available {
+                overflowed = true;
+                break;
+            }
+        }
+        if overflowed && candidates.get().is_none() {
             newline(ui);
             available = full_width;
-        } else {
-            let mut probe_width = 0.0;
-            let mut candidates = RowBreakCandidates::default();
-            let mut overflowed = false;
-            for (i, ch) in chars.iter().enumerate() {
-                probe_width += glyph_width(ui, &font_id, *ch);
-                let next = chars.get(i + 1).copied();
-                candidates.add(i, *ch, next, probe_width <= available);
-                if probe_width > available {
-                    overflowed = true;
-                    break;
-                }
-            }
-            if overflowed && candidates.get().is_none() {
-                newline(ui);
-                available = full_width;
-            }
         }
     }
 
@@ -826,10 +743,6 @@ impl CommonMarkViewerInternal {
             }
             pulldown_cmark::Event::Code(text) => {
                 self.text_style.code = true;
-                // Keep inline code inside the wrapping layout by manually wrapping
-                // at word boundaries. This avoids the negative X offset issue caused
-                // by overflow in egui's wrapping layout.
-                // See: https://github.com/emilk/egui/issues/2578
                 render_inline_code_wrapped(ui, &text, self.text_style.heading);
                 self.text_style.code = false;
             }
